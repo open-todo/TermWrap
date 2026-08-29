@@ -5,21 +5,12 @@
 export type TermLine = { k: 'cmd' | 'out' | 'ok' | 'err' | 'warn' | 'sys' | 'dim'; t: string };
 export type Scene = { id: string; label: string; blurb: string; lines: TermLine[] };
 
-export const H_INSTALL_URL = '/files/install.sh';
-
 // GitHub is the canonical download source (convenient curl|bash, no deploy needed);
 // /files/* on this site mirrors the same app/ folder for the source browser.
 export const GH_REPO = 'https://github.com/open-todo/TermWrap';
 export const GH_RAW = 'https://raw.githubusercontent.com/open-todo/TermWrap/main/app';
 export const H_INSTALL_GH = `${GH_RAW}/install.sh`;
 export const ghRaw = (file: string) => `${GH_RAW}/${file}`;
-
-// origin for absolute curl|bash commands; falls back to a placeholder hint
-export function siteOrigin(): string {
-  if (typeof window === 'undefined') return '';
-  const o = window.location.origin;
-  return o && o.startsWith('http') ? o : 'https://your-deployed-site';
-}
 
 export const ASCII_LOGO = [
   '  ▄▄▄▄▄▄▄▄▄▄  ▄▄        ▄▄ ',
