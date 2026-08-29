@@ -13,10 +13,10 @@ import { Install } from './components/Install';
 import { Faq } from './components/Faq';
 import { Footer } from './components/Footer';
 import { Reveal, CopyButton } from './components/ui';
-import { H_INSTALL_URL, siteOrigin } from './lib/data';
+import { H_INSTALL_GH } from './lib/data';
 
 function BigCta() {
-  const cmd = `curl -fsSL ${siteOrigin()}${H_INSTALL_URL} | bash`;
+  const cmd = `curl -fsSL ${H_INSTALL_GH} | bash`;
   return (
     <section className="relative overflow-hidden py-24 md:py-36 border-t border-line grid-bg">
       <div className="pointer-events-none absolute left-1/2 top-1/2 h-[300px] w-[600px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-pho/10 blur-[120px]" />

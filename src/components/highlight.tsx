@@ -118,7 +118,7 @@ export function CodeBlock({
   );
 }
 
-// fetch source text served from /public/files
+// fetch app source served at /files/ (mounted from ../app by the vite plugin)
 export function useFileSource(path: string) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState(false);

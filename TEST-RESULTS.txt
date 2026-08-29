@@ -1,0 +1,78 @@
+PASS | 01 --version prints version, exits 0
+PASS | 02 --help exits 0, shows USAGE
+PASS | 03 --caveats exits 0, lists SAME-UID ceiling
+PASS | 04 basic run: echo inside sandbox
+PASS | 05 exit code passthrough (exit 7)
+PASS | 06 fake root: uid 0 inside (proot -0)
+PASS | 07 real HOME shadowed (secret.txt invisible)
+PASS | 08 ~/.ssh invisible inside
+PASS | 09 host secret intact after all runs
+PASS | 10 --home: file persists across runs
+PASS | 11 persistent box home lives in TW_HOME
+PASS | 12 .bashrc + notice provisioned
+PASS | 13 --ephemeral: file gone on next run
+PASS | 14 ephemeral home wiped from disk
+PASS | 15 --workdir: guest starts in /etc
+PASS | 16 --setenv injects var
+PASS | 17 --unsetenv drops inherited var
+PASS | 18 --clearenv scrubs env to essentials
+PASS | 19 --clearenv PATH rebuilt from prefix/bin
+PASS | 20 --label: custom id in sandbox notice
+PASS | 21 --bind rw: guest writes, host sees
+PASS | 22 --bind SRC:DST two-path form
+PASS | 24 --ro-bind: reads still work
+FAIL | 25 ro-bind mode fidelity 666->644 (u+w-only restore)
+PASS | 26 --hide file: reads as empty (/dev/null)
+PASS | 27 --hide dir: contents vanish
+PASS | 28 --tmpfs: writable empty overlay
+PASS | 29 --fresh-tmp(default): overlay empty
+PASS | 29b fresh-tmp hides host tmp file
+PASS | 30 --share-tmp: real tmp visible
+PASS | 31 WITHOUT netblock: guest CAN reach network
+PASS | 32 --unshare-net: connect fails closed instantly
+PASS | 33 --unshare-net: bash /dev/tcp blocked
+PASS | 34 getaddrinfo fails fast (EAI_NONAME)
+PASS | 35 missing netblock.so => loud exit 1
+PASS | 36 audit captures netblock hits (1 lines)
+PASS | 37 --timeout: fuse at 2s rc=137
+PASS | 38 --max-fsize 1MB: 2MB write killed
+PASS | 39 --max-mem 256 => ulimit -v 262144
+PASS | 40 --max-mem: 512MB alloc refused
+PASS | 41 --nice applied
+PASS | 43 tw jail build stock
+PASS | 44 tw jail list shows stock
+PASS | 45 --jail: guest rm -rf $PREFIX/bin; host SURVIVES
+PASS | 46 --jail: snapshot seen deleted inside
+PASS | 47 sandbox functional after jail demo
+PASS | 48 --ephemeral-jail: clone discarded
+PASS | 49 tw jail path prints location
+PASS | 50 tw jail discard removes jail
+PASS | 51 nested run refused (TW_SANDBOX_ID set)
+PASS | 52 --allow-nested permits nesting
+PASS | 53 TW_ALLOW_NESTED=1 env hatch
+PASS | 54 --profile ai-agent loads system profile
+PASS | 55 profiles.d/ override wins search order
+PASS | 56 unknown profile => loud exit 1
+PASS | 57 --selftest full suite runs
+PASS | 58 selftest detects proot
+PASS | 59 selftest verifies netblock EACCES
+PASS | 60 selftest honestly flags non-Termux
+PASS | 61 guard: OK verdict
+PASS | 62 guard: FAILED verdict
+PASS | 63 guard: FUSE verdict
+PASS | 64 guard: exit code = failures (2)
+PASS | 65 guard: summary 4 ran
+PASS | 67 --dry-run prints exact proot command
+FAIL | 68 --dry-run SIDE EFFECT: box home created
+CONFIRMED | K1 sequential --profile x5 => false recursion error
+CONFIRMED | K3 --setenv LD_PRELOAD shadows netblock (last wins)
+CONFIRMED | K4 --max-mem abc crashes (set -u)
+CONFIRMED | K7 CRITICAL: --ro-bind write-protection DEFEATED by default -0 (proot fake_id0 chmods files writable for the guest; write lands on host). Works only with --no-fakeroot.
+PASS | 23b --ro-bind DENIES writes when paired with --no-fakeroot
+CONFIRMED | K2 profile word-split: stray token 'world' executed as guest command (exit 127, --dry-run swallowed)
+CONFIRMED | K5 bwrap 2-arg --bind misparse: second path becomes the executed command
+CONFIRMED | K8 SIGTERM to tw: proot ignores TERM, whole guest tree survives; epilogue still prints 'host untouched'
+CONFIRMED | K9 --timeout KILL fuse: proot SIGKILLed => --kill-on-exit cannot run, tracees orphaned (sleep survived fuse)
+CONFIRMED | K10 --label silently ignored when --home NAME set (SID=box name); --ephemeral silently overrides --home
+CONFIRMED | K11 netblock bypassed from INSIDE guest: `env -u LD_PRELOAD` / `unset LD_PRELOAD` => full network (no compile needed); glibc ld.so.preload blocks it but Termux/bionic has no loader-level preload
+CONFIRMED | K12 post-mortem: after tracer SIGKILL, guest survives orphaned (TracerPid=0, ppid=1) in UNDEFINED state: functional sleep | 100%-CPU spin | permanent hang; tracer arbitration (the sandbox itself) is gone for whatever it does next

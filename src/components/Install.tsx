@@ -1,9 +1,9 @@
 import { Terminal, FlaskConical, Ghost, Wand2 } from 'lucide-react';
 import { Reveal, SectionHead, CopyButton, TermChrome } from './ui';
-import { H_INSTALL_URL, siteOrigin } from '../lib/data';
+import { H_INSTALL_GH } from '../lib/data';
 
 export function Install() {
-  const installCmd = `curl -fsSL ${siteOrigin()}${H_INSTALL_URL} | bash`;
+  const installCmd = `curl -fsSL ${H_INSTALL_GH} | bash`;
 
   return (
     <section id="install" className="relative py-24 md:py-32">
@@ -23,7 +23,7 @@ export function Install() {
                 icon: Terminal,
                 n: '01',
                 t: 'bootstrap',
-                body: 'One curl|bash: pulls proot/coreutils/tar/clang, installs tw, compiles netblock.so, seeds the ai-agent profile, self-tests.',
+                body: 'One curl|bash straight from GitHub: pulls proot/coreutils/tar/clang/util-linux, installs tw, compiles netblock.so, seeds the ai-agent profile, self-tests.',
                 cmd: installCmd,
               },
               {
@@ -105,7 +105,8 @@ export function Install() {
                   <div className="mt-5 border border-line bg-ink/60 px-4 py-4">
                     <div className="text-[10px] uppercase tracking-[0.25em] text-dim mb-2">prefer the audited path?</div>
                     <p className="text-[11.5px] leading-relaxed text-mist">
-                      Every file is served raw under <span className="text-pho">/files/</span>. Read
+                      Every file lives in the repo under <span className="text-pho">app/</span> — raw from
+                      GitHub (raw.githubusercontent.com/open-todo/TermWrap/main/app), mirrored here under <span className="text-pho">/files/</span>. Read
                       termwrap.sh in the source browser above, download it, <span className="text-[#d9f8dd]">install -m 0755 termwrap.sh $PREFIX/bin/tw</span> — no pipe required.
                     </p>
                   </div>

@@ -1,5 +1,5 @@
 import { ArrowUpRight, TerminalSquare } from 'lucide-react';
-import { ASCII_LOGO, H_INSTALL_URL } from '../lib/data';
+import { GH_REPO, GH_RAW, H_INSTALL_GH, ASCII_LOGO } from '../lib/data';
 
 export function Footer() {
   return (
@@ -17,13 +17,13 @@ export function Footer() {
             </p>
             <div className="mt-6 flex flex-wrap gap-3">
               <a
-                href="/files/install.sh"
+                href={H_INSTALL_GH}
                 className="inline-flex items-center gap-2 border border-pho/40 bg-pho/10 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-pho hover:bg-pho hover:text-ink transition-colors"
               >
                 <TerminalSquare size={13} /> install.sh
               </a>
               <a
-                href="#source"
+                href={GH_REPO}
                 className="inline-flex items-center gap-2 border border-line px-4 py-2.5 text-[11px] uppercase tracking-[0.18em] text-mist hover:text-pho hover:border-pho/40 transition-colors"
               >
                 read the source <ArrowUpRight size={13} />
@@ -52,11 +52,11 @@ export function Footer() {
               <div className="text-[10px] uppercase tracking-[0.3em] text-dim mb-4">files</div>
               <ul className="space-y-2.5 text-[12px] text-mist">
                 {[
-                  ['/files/termwrap.sh', 'termwrap.sh'],
-                  ['/files/tw-netblock.c', 'tw-netblock.c'],
-                  ['/files/ai-agent.conf', 'ai-agent.conf'],
-                  ['/files/agent-guard.sh', 'agent-guard.sh'],
-                  [H_INSTALL_URL, 'install.sh'],
+                  [`${GH_RAW}/termwrap.sh`, 'termwrap.sh'],
+                  [`${GH_RAW}/tw-netblock.c`, 'tw-netblock.c'],
+                  [`${GH_RAW}/ai-agent.conf`, 'ai-agent.conf'],
+                  [`${GH_RAW}/agent-guard.sh`, 'agent-guard.sh'],
+                  [H_INSTALL_GH, 'install.sh'],
                 ].map(([h, l]) => (
                   <li key={h}>
                     <a href={h} className="hover:text-pho transition-colors">{l}</a>
@@ -69,7 +69,14 @@ export function Footer() {
 
         <div className="mt-14 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 border-t border-line pt-6 text-[10.5px] uppercase tracking-[0.18em] text-dim">
           <span>
-            <span className="text-pho font-bold">COPYRIGHT OPENTODO©</span> · MIT license · v0.1.0 · no trackers, no beacons
+            <span className="text-pho font-bold">COPYRIGHT OPENTODO©</span> ·{' '}
+            <a
+              href={`${GH_REPO}/blob/main/LICENSE`}
+              className="hover:text-pho transition-colors underline decoration-line underline-offset-2"
+            >
+              MIT license
+            </a>{' '}
+            · v0.2.0 · no trackers, no beacons
           </span>
           <span>
             made for <span className="text-pho">unrooted android</span> · same-uid ptrace, honest limits
