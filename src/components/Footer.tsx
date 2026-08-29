@@ -69,7 +69,14 @@ export function Footer() {
 
         <div className="mt-14 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 border-t border-line pt-6 text-[10.5px] uppercase tracking-[0.18em] text-dim">
           <span>
-            <span className="text-pho font-bold">COPYRIGHT OPENTODO©</span> · MIT license · v0.2.0 · no trackers, no beacons
+            <span className="text-pho font-bold">COPYRIGHT OPENTODO©</span> ·{' '}
+            <a
+              href={`${GH_REPO}/blob/main/LICENSE`}
+              className="hover:text-pho transition-colors underline decoration-line underline-offset-2"
+            >
+              MIT license
+            </a>{' '}
+            · v0.2.0 · no trackers, no beacons
           </span>
           <span>
             made for <span className="text-pho">unrooted android</span> · same-uid ptrace, honest limits

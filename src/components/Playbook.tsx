@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Bot, FileCheck2, Repeat2, Download } from 'lucide-react';
 import { Reveal, SectionHead } from './ui';
 import { CodeBlock, useFileSource } from './highlight';
+import { ghRaw } from '../lib/data';
 
 const STEPS = [
   {
@@ -27,8 +28,8 @@ export function Playbook() {
   const guard = useFileSource('/files/agent-guard.sh');
 
   const active = tab === 'profile'
-    ? { data: profile.text, lang: 'conf' as const, name: 'ai-agent.conf', path: '/files/ai-agent.conf' }
-    : { data: guard.text, lang: 'bash' as const, name: 'agent-guard.sh', path: '/files/agent-guard.sh' };
+    ? { data: profile.text, lang: 'conf' as const, name: 'ai-agent.conf', path: '/files/ai-agent.conf', raw: ghRaw('ai-agent.conf') }
+    : { data: guard.text, lang: 'bash' as const, name: 'agent-guard.sh', path: '/files/agent-guard.sh', raw: ghRaw('agent-guard.sh') };
 
   return (
     <section id="playbook" className="relative py-24 md:py-32">
@@ -86,7 +87,7 @@ export function Playbook() {
                 </button>
               ))}
               <a
-                href={active.path}
+                href={active.raw}
                 download
                 className="ml-auto flex items-center gap-2 px-5 py-3 text-[11px] uppercase tracking-[0.2em] text-mist hover:text-pho bg-panel"
               >
