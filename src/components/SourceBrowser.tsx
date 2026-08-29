@@ -43,7 +43,7 @@ export function SourceBrowser() {
               <div className="flex items-center gap-2">
                 <CopyButton text={text ?? ''} label="copy raw" />
                 <a
-                  href={meta.path}
+                  href={meta.raw}
                   download
                   className="inline-flex items-center gap-2 border border-pho/40 bg-pho/10 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-pho hover:bg-pho hover:text-ink transition-colors"
                 >

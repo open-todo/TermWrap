@@ -28,7 +28,7 @@ export function Nav() {
             <span className="text-sm font-bold tracking-[0.22em] text-[#e6f4e6]">
               TERMWRAP<span className="text-pho">_</span>
             </span>
-            <span className="hidden text-[10px] tracking-[0.2em] text-dim sm:inline">v0.1.0</span>
+            <span className="hidden text-[10px] tracking-[0.2em] text-dim sm:inline">v0.2.0</span>
           </a>
 
           <nav className="hidden items-center gap-6 lg:flex">

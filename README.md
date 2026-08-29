@@ -9,8 +9,8 @@
 tw --profile ai-agent --jail stock --timeout 900 -- python agent.py
 ```
 
-- **Version:** 0.1.0 · **License:** MIT · **Platform:** Termux on Android (aarch64 / arm / x86_64)
-- **Requires:** [Termux](https://f-droid.org/en/packages/com.termux/), `proot`, `coreutils`, `tar`, `findutils`, `clang` (the installer handles all of it)
+- **Version:** 0.2.0 · **License:** MIT ([LICENSE](LICENSE)) · **Platform:** Termux on Android (aarch64 / arm / x86_64)
+- **Requires:** [Termux](https://f-droid.org/en/packages/com.termux/), `proot`, `coreutils`, `tar`, `findutils`, `clang`, `util-linux` (the installer handles all of it)
 - **Threat model:** AI agents & semi-trusted automation — *not* actively malicious native code (read [`tw --caveats`](#-threat-model--honest-limitations))
 
 ---
@@ -70,7 +70,7 @@ Each `tw` run assembles a `proot` invocation plus environment plumbing, launches
 │  │  env LD_PRELOAD=netblock.so   socket()/connect()/getaddrinfo()  │ │
 │  │  │                             fail closed with EACCES          │ │
 │  │  bash -c 'ulimit …; exec "$@"'   resource cage preamble         │ │
-│  │  timeout -k 3 -s KILL N          optional fuse                  │ │
+│  │  (own process group — tw fuses it TERM→KILL on --timeout)       │ │
 │  └─────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -85,21 +85,23 @@ What a default run gives you:
 | **Hidden paths** | empty-dir/`/dev/null` overlays (`--hide`) | secrets that "don't exist" for the guest |
 | **Network off** | `LD_PRELOAD` shim (`--unshare-net`) | exfiltration via python/node/curl/wget/git… |
 | **Resource cage** | `ulimit` prologue (`--max-procs/files/fsize/mem`, `--nice`) | fork bombs, runaway memory, disk stuffing |
-| **Fuse** | `timeout -k 3 -s KILL N` | forever-loops, hung downloads |
+| **Fuse** | in-wrapper watcher: TERM the tree, KILL after 3 s grace, verify death | forever-loops, hung downloads — no orphans |
 | **Jail** | tar snapshot of `$PREFIX` bound read-implications-aside over the real one | `rm -rf $PREFIX`, package mangling |
 | **Audit** | `proot -v 9` trace (`--audit FILE`) | "what did it actually run?" |
 
 ## Install
 
-Inside Termux:
+Inside Termux — one line, straight from GitHub:
 
 ```bash
-curl -fsSL https://open-todo.github.io/TermWrap/files/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/open-todo/TermWrap/main/app/install.sh | bash
 ```
+
+(Prefer the audited path? The same files are mirrored at `/files/install.sh` on the project site, or download `app/install.sh` from the repo and run it locally — the installer prefers sibling files, so a plain directory download works offline.)
 
 The installer is idempotent and self-contained (it embeds every payload, so it works even if you download just that one file). It:
 
-1. installs dependencies — `proot coreutils tar findutils clang`
+1. installs dependencies — `proot coreutils tar findutils clang util-linux`
 2. installs `tw` → `$PREFIX/bin/tw`
 3. compiles the netblock shim → `$PREFIX/lib/termwrap/netblock.so`
 4. installs the `ai-agent` profile → `$PREFIX/share/termwrap/profiles/`
@@ -147,9 +149,9 @@ Flags may also be written `--flag=value`. Paths are `~`-expanded and made absolu
 | Flag | Meaning |
 |---|---|
 | `--bind SRC[:DST]` | bind host path into the guest, read-write |
-| `--ro-bind SRC[:DST]` | bind read-only — enforced by a `chmod a-w` snapshot, restored on exit (best-effort; crash windows and already-open fds are not covered) |
+| `--ro-bind SRC[:DST]` | bind read-only. **Enforced only with `--no-fakeroot`** — under the default `-0`, proot's `fake_id0` lifts host file modes for the fake-root guest, so tw *refuses* the combination (override with `TW_ALLOW_ROBIND_FAKE=1` at your own risk). Original modes are restored exactly on exit |
 | `--dev-bind SRC[:DST]` | bind device nodes (same mechanism, flag parity with bwrap) |
-| `--hide PATH` (alias `--deny`) | shadow a host path — dirs get an empty overlay, files get `/dev/null` |
+| `--hide PATH` (alias `--deny`) | shadow a host path — dirs appear empty, files read as `/dev/null`. The strongest option for secrets: absence beats permissions |
 | `--tmpfs PATH` | empty writable overlay at a guest path |
 | `--rootfs DIR` | advanced: use DIR as the guest root (`proot -r`) instead of the in-place view |
 | `-w, --workdir DIR` | guest working directory (default: sandbox `$HOME`) |
@@ -190,8 +192,8 @@ Flags may also be written `--flag=value`. Paths are `~`-expanded and made absolu
 
 | Flag | Meaning |
 |---|---|
-| `--audit FILE` | `proot -v9` systrace → FILE (relative paths land in `$TW_HOME/logs/`) |
-| `--dry-run` | print the exact `proot` command line, change nothing |
+| `--audit FILE` | `proot -v9` systrace → FILE (relative paths land in `$TW_HOME/logs/`; note the guest's stderr is captured into FILE while auditing) |
+| `--dry-run` | print the exact `proot` command line; no persistent state changes (box homes, notices, ro-bind chmods are skipped) |
 | `-q, --quiet` | suppress banners |
 
 **tmp policy / root faking**
@@ -311,6 +313,7 @@ The epilogue of every run summarizes wall time, exit code and (when auditing) `e
 | `TW_NETBLOCK` / `TW_NETBLOCK_LOG` | set inside the guest by `--unshare-net` |
 | `TW_SANDBOX_ID` | set inside the guest; its presence is what the nested-run guard checks |
 | `TW_ALLOW_NESTED=1` | env-based alternative to `--allow-nested` |
+| `TW_ALLOW_ROBIND_FAKE=1` | permit `--ro-bind` under fakeroot (unprotected — not recommended) |
 | `TW_DEBUG=1` | `[dbg]` traces from the wrapper itself |
 | `NO_COLOR` | disable ANSI colours |
 
@@ -325,8 +328,8 @@ The epilogue of every run summarizes wall time, exit code and (when auditing) `e
 Read this before trusting a run (`tw --caveats` prints it too).
 
 1. **Same-uid ceiling.** proot rewrites paths, not capabilities. The guest keeps your Termux uid; a hostile native binary that ignores the filesystem (or knows ptrace tricks) can still poke you. For a real uid split, wrap whole sessions in an Android work profile (Shelter/Insular).
-2. **Netblock scope.** The `--unshare-net` shim is `LD_PRELOAD` over libc `socket()`. Fail-closed for Termux packages; **static binaries and Go's raw-syscall dial path bypass it.** An agent-safety rail, not a netns.
-3. **ro-bind is a chmod snapshot.** Enforced by `chmod a-w` before the run + restore after. Crash windows and already-open fds are outside the guarantee. For anything precious, `--hide` beats permissions.
+2. **Netblock scope.** The `--unshare-net` shim is `LD_PRELOAD` over libc `socket()`. Fail-closed for Termux packages; **static binaries and Go's raw-syscall dial path bypass it — and so can the guest itself with one builtin** (`unset LD_PRELOAD` / `env -u LD_PRELOAD`); tw refuses user `--setenv LD_PRELOAD`, but a guest process can always edit its own environment. It stops network *accidents*, not a process that knows it is boxed — keep the network on the host side of the loop for sandbox-aware agents.
+3. **ro-bind is a chmod snapshot** — and only a real one under `--no-fakeroot`. Under the default `-0` fakeroot, proot's `fake_id0` extension genuinely chmods host files writable whenever the fake-root guest writes them, silently defeating chmod-based protection — since 0.2.0 tw refuses that combination (see the flag table). With `--no-fakeroot` the snapshot enforces, modes are restored exactly, and crash windows remain outside the guarantee. For anything precious, `--hide` beats permissions.
 4. **ptrace overhead.** fork/exec-heavy workloads pay 1.5–3×. Compute jobs without side effects belong outside the sandbox.
 5. **No PID/IPC isolation.** The guest sees your process table and can signal within the uid. A cage of view, not of privilege.
 6. **The point.** For AI agents the winning combo is `tw --profile ai-agent --jail stock --timeout 900 -- <agent>`: jail + netblock + audit + fuse, with secrets off-device.
@@ -390,6 +393,18 @@ To release the app itself, ship `app/` as-is — it has no build step. The insta
 
 ## License
 
-MIT — © OPENTODO. See the headers of [`app/termwrap.sh`](app/termwrap.sh) and [`app/install.sh`](app/install.sh).
+MIT — see [LICENSE](LICENSE). © OPENTODO.
+
+## Changelog
+
+**0.2.0 — hardening release** (driven by the [full test campaign](TEST-REPORT.md)):
+- sandbox tree runs in its own process group (`setsid`); `--timeout`/signals now TERM→KILL the whole tree and tw *verifies* death before reporting `tree reaped` — no more orphaned guests after a blown fuse (was: tracees survived the KILL fuse and SIGTERM)
+- `--ro-bind` refused under default fakeroot (proot `fake_id0` defeats chmod-based protection); enforced with `--no-fakeroot`; exact mode restore (was: lossy 666→644)
+- netblock env applied after user env; user `--setenv/--unsetenv` of `LD_PRELOAD`/`TW_NETBLOCK` refused — the shim can no longer be env-disarmed
+- `--dry-run` performs no persistent state changes
+- profile parser: sequential `--profile` fixed, stray tokens fail loudly, resource flags validated, unsupported ulimits reported instead of silently dropped
+- honest caveats: `--caveats` now documents the `LD_PRELOAD`-strip bypass and teardown edges; precedence surprises (`--ephemeral` vs `--home`, `--label`, `--script`) warn instead of silently overriding
+
+**0.1.0 — initial release.**
 
 > **trust nothing, run anything.**

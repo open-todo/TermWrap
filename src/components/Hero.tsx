@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ShieldCheck, Cpu, ChevronDown, FileCode2, Zap } from 'lucide-react';
 import { TermChrome, CopyButton } from './ui';
-import { H_INSTALL_URL, siteOrigin } from '../lib/data';
+import { H_INSTALL_GH } from '../lib/data';
 
 type L = { k: 'c' | 'o' | 'g' | 'r' | 'y' | 'w'; t: string };
 const LOOP: L[] = [
@@ -86,7 +86,7 @@ function HeroTerm() {
 }
 
 export function Hero() {
-  const installCmd = `curl -fsSL ${siteOrigin()}${H_INSTALL_URL} | bash`;
+  const installCmd = `curl -fsSL ${H_INSTALL_GH} | bash`;
 
   return (
     <section id="top" className="relative grid-bg overflow-hidden pt-32 md:pt-40 pb-16 md:pb-24">

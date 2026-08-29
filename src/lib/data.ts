@@ -7,6 +7,13 @@ export type Scene = { id: string; label: string; blurb: string; lines: TermLine[
 
 export const H_INSTALL_URL = '/files/install.sh';
 
+// GitHub is the canonical download source (convenient curl|bash, no deploy needed);
+// /files/* on this site mirrors the same app/ folder for the source browser.
+export const GH_REPO = 'https://github.com/open-todo/TermWrap';
+export const GH_RAW = 'https://raw.githubusercontent.com/open-todo/TermWrap/main/app';
+export const H_INSTALL_GH = `${GH_RAW}/install.sh`;
+export const ghRaw = (file: string) => `${GH_RAW}/${file}`;
+
 // origin for absolute curl|bash commands; falls back to a placeholder hint
 export function siteOrigin(): string {
   if (typeof window === 'undefined') return '';
@@ -30,7 +37,7 @@ export const SCENES: Scene[] = [
     blurb: 'lock an interactive shell down: secrets hidden, notes read-only, /sdcard gone',
     lines: [
       { k: 'cmd', t: 'tw --ephemeral --hide ~/.ssh --hide /sdcard --ro-bind ~/notes -- bash' },
-      { k: 'sys', t: ':: termwrap v0.1.0 — assembling ptrace sandbox' },
+      { k: 'sys', t: ':: termwrap v0.2.0 — assembling ptrace sandbox' },
       { k: 'ok', t: '[ok] scratch home → ~/.local/share/termwrap/tmp/home-3f9c1e (wipe on exit)' },
       { k: 'ok', t: '[ok] hidden: /data/data/com.termux/files/home/.ssh' },
       { k: 'ok', t: '[ok] hidden: /sdcard' },
@@ -46,7 +53,7 @@ export const SCENES: Scene[] = [
       { k: 'cmd', t: '[tw:3f9c1e] ~ $ echo pwned >> ~/notes/todo.txt' },
       { k: 'err', t: 'bash: /data/data/com.termux/files/home/notes/todo.txt: Permission denied' },
       { k: 'cmd', t: '[tw:3f9c1e] ~ $ exit' },
-      { k: 'ok', t: '[ok] sandbox 3f9c1e torn down · 41s · perms restored · host untouched' },
+      { k: 'ok', t: '[ok] sandbox 3f9c1e torn down · 41s · exit 0 · tree reaped' },
     ],
   },
   {
@@ -67,8 +74,8 @@ export const SCENES: Scene[] = [
       { k: 'err', t: 'curl: (7) Could not connect: Permission denied' },
       { k: 'out', t: '[agent] tool_call: run("rm -rf $PREFIX")   # model got creative' },
       { k: 'out', t: '[agent] rm: removed 14 203 objects (jail volume only)' },
-      { k: 'sys', t: ':: fuse: agent exceeded 900s — hard-kill tree (SIGKILL)' },
-      { k: 'ok', t: "[ok] host $PREFIX: untouched · host $HOME: untouched · audit: 47 execve, 1 netblock" },
+      { k: 'sys', t: ':: fuse: agent exceeded 900s — TERM tree, KILL after grace' },
+      { k: 'ok', t: "[ok] tree reaped · host $PREFIX+$HOME intact · audit: 47 execve, 1 netblock" },
       { k: 'cmd', t: 'ls $PREFIX/bin | wc -l   # host, after the run' },
       { k: 'out', t: '612        # everything still here. that is the point.' },
     ],
@@ -79,8 +86,8 @@ export const SCENES: Scene[] = [
     blurb: 'inspect the exact syscall choreo before you trust it',
     lines: [
       { k: 'cmd', t: "tw --dry-run --profile ai-agent -- bash -c 'id'" },
-      { k: 'sys', t: ':: dry-run — nothing executed' },
-      { k: 'dim', t: '  timeout -k 3 -s KILL 900 proot --kill-on-exit --link2symlink -0 -v 9 -b /dev' },
+      { k: 'sys', t: ':: dry-run — nothing executed, no persistent state changed' },
+      { k: 'dim', t: '  proot --kill-on-exit --link2symlink -0 -v 9 -b /dev' },
       { k: 'dim', t: '  -b /proc -b /sys -b <scratch>:/data/…/home -b <tmp>:/data/…/usr/tmp -b <e>:/sdcard' },
       { k: 'dim', t: '  -b <e>:/data/…/home/.ssh -b /dev/null:/data/…/home/.netrc -w /data/…/home' },
       { k: 'dim', t: '  env TW_SANDBOX_ID=9a41c2 TW_NETBLOCK=1 LD_PRELOAD=/usr/lib/termwrap/netblock.so' },
@@ -206,7 +213,7 @@ export const FEATURES: Feature[] = [
     icon: 'Timer',
     title: 'hard fuses',
     tag: '--timeout',
-    body: 'timeout -k wraps the whole proot tree with --kill-on-exit semantics. When the fuse blows, the entire sandbox dies — no orphan processes, ever.',
+    body: 'The sandbox runs in its own process group. When the fuse blows, tw TERMs the whole tree (proot unwinds, --kill-on-exit runs), KILLs after a 3s grace, and verifies death — no orphan processes, ever.',
   },
   {
     icon: 'ScrollText',
@@ -310,9 +317,9 @@ export const MARQUEE = [
 ];
 
 export const FILES_META = [
-  { name: 'termwrap.sh', lang: 'bash' as const, role: 'the sandbox engine — install to $PREFIX/bin/tw', path: '/files/termwrap.sh' },
-  { name: 'tw-netblock.c', lang: 'c' as const, role: 'LD_PRELOAD socket kill-switch', path: '/files/tw-netblock.c' },
-  { name: 'ai-agent.conf', lang: 'conf' as const, role: 'default policy profile for AI agents', path: '/files/ai-agent.conf' },
-  { name: 'agent-guard.sh', lang: 'bash' as const, role: 'model proposes → sandbox disposes loop', path: '/files/agent-guard.sh' },
-  { name: 'install.sh', lang: 'bash' as const, role: 'self-contained curl|bash bootstrap', path: '/files/install.sh' },
+  { name: 'termwrap.sh', lang: 'bash' as const, role: 'the sandbox engine — install to $PREFIX/bin/tw', path: '/files/termwrap.sh', raw: ghRaw('termwrap.sh') },
+  { name: 'tw-netblock.c', lang: 'c' as const, role: 'LD_PRELOAD socket kill-switch', path: '/files/tw-netblock.c', raw: ghRaw('tw-netblock.c') },
+  { name: 'ai-agent.conf', lang: 'conf' as const, role: 'default policy profile for AI agents', path: '/files/ai-agent.conf', raw: ghRaw('ai-agent.conf') },
+  { name: 'agent-guard.sh', lang: 'bash' as const, role: 'model proposes → sandbox disposes loop', path: '/files/agent-guard.sh', raw: ghRaw('agent-guard.sh') },
+  { name: 'install.sh', lang: 'bash' as const, role: 'self-contained curl|bash bootstrap', path: '/files/install.sh', raw: ghRaw('install.sh') },
 ];

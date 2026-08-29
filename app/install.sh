@@ -30,7 +30,7 @@ cat <<'BANNER'
         __
       _|  |_
      |  ___  |    termwrap  ·  ptrace sandbox for unrooted android
-     | |   | |_     tw v0.1.0 — no root, no namespaces, no excuses
+     | |   | |_     tw v0.2.0 — no root, no namespaces, no excuses
      | |___  __|
      |_______|
 BANNER
@@ -50,8 +50,8 @@ BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
 # --- 1. dependencies ----------------------------------------------------------
-say "installing dependencies (proot coreutils tar findutils clang)…"
-pkg install -y proot coreutils tar findutils clang >/dev/null \
+say "installing dependencies (proot coreutils tar findutils clang util-linux)…"
+pkg install -y proot coreutils tar findutils clang util-linux >/dev/null \
   || die "pkg install failed — check your repos/network, then re-run"
 ok "dependencies ready"
 
@@ -78,12 +78,24 @@ else
 #  License: MIT. Threat model: AI agents & semi-trusted automation, NOT
 #  actively malicious native code (see: tw --caveats).
 #
+#  v0.2.0 hardening:
+#   - sandbox runs in its own process group (setsid) so teardown can TERM
+#     then KILL the whole tree — no more orphans after --timeout/signals
+#   - --ro-bind is refused under fakeroot (-0): proot's fake_id0 would lift
+#     file modes for the guest, silently defeating write protection
+#   - ro-bind mode restore is exact (was: lossy u+w only)
+#   - --unshare-net env applied AFTER user env; user LD_PRELOAD /
+#     TW_NETBLOCK injection refused (netblock cannot be env-disarmed)
+#   - --dry-run performs no persistent state changes
+#   - profile parser: sequential --profile works; stray tokens fail loudly
+#   - resource limits validated; silent ulimit failures are reported
+#
 #  COPYRIGHT OPENTODO© — released under the MIT license.
 # =============================================================================
 
 set -uo pipefail
 
-readonly TW_VERSION="0.1.0"
+readonly TW_VERSION="0.2.0"
 readonly TW_NAME="termwrap"
 
 # --------------------------------------------------------------------------
@@ -133,7 +145,7 @@ AUDIT=""                # audit log file (proot -v)
 DRY_RUN=0
 ALLOW_NESTED=0
 QUIET=0
-PROFILE_DEPTH=0
+EPHEMERAL_EXPLICIT=0    # --ephemeral given explicitly (precedence warnings)
 GCWD=""                 # guest working dir (default: guest $HOME)
 SCRIPT_FILE=""          # host file to bind+run inside
 SANDBOX_LABEL=""        # custom id label
@@ -152,13 +164,24 @@ CMD=()          # command to execute
 # cleanup registries
 CLEAN_TMPDIRS=()
 CLEAN_RO=()
+RO_MODES=()              # per-ro-bind mode snapshots (exact restore)
 CLEAN_EPH_HOME=""
 CHILD_PID=""
+FUSE_PID=""
+TREE_ALIVE=0
 
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
 need_arg() { [[ $# -ge 2 && -n ${2:-} ]] || die "flag $1 needs an argument"; }
+
+num_arg() { [[ "${2:-}" =~ ^[0-9]+$ ]] || die "$1 expects a non-negative integer (got '${2:-}')"; }
+
+bind_arity_warn() {  # guard against bwrap-style two-arg usage: --bind SRC DST
+  [[ "$2" == *:* || -z "$3" || "$3" == -* ]] && return 0
+  warn "bwrap-style two-arg '$1 $2 $3' detected — '$3' would run as the command."
+  warn "  termwrap syntax is '$1 SRC:DST'; put '--' before the command to disambiguate."
+}
 
 expand_path() {  # echoes expanded path, ~ aware, made absolute against $PWD
   local p="$1"
@@ -183,28 +206,57 @@ valid_name() { [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$ ]] || die "invalid n
 
 # --------------------------------------------------------------------------
 # profile loading (--profile NAME|FILE)
-# fills the global array PROFILE_TOKENS for re-injection by the parser
+# Fully expands --profile includes at load time (depth-limited, recursion-
+# safe), validates tokens: one flag per line, values inline, '#'-comments.
+# A stray bare token would otherwise silently become the guest command.
 # --------------------------------------------------------------------------
 PROFILE_TOKENS=()
 collect_profile() {
-  local q="$1" f=""
+  local q="$1" depth="${2:-0}" f=""
   if   [[ -f "$q" ]];                       then f="$q"
   elif [[ -f "$TW_PROFILES_USR/$q.conf" ]]; then f="$TW_PROFILES_USR/$q.conf"
   elif [[ -f "$TW_PROFILES_USR/$q" ]];      then f="$TW_PROFILES_USR/$q"
   elif [[ -f "$TW_PROFILES_SYS/$q.conf" ]]; then f="$TW_PROFILES_SYS/$q.conf"
   elif [[ -f "$TW_PROFILES_SYS/$q" ]];      then f="$TW_PROFILES_SYS/$q"
-  else die "profile not found: $q (looked in ~/$TW_PROFILES_USR and $TW_PROFILES_SYS)"
+  else die "profile not found: $q (looked in $TW_PROFILES_USR and $TW_PROFILES_SYS)"
   fi
-  PROFILE_DEPTH=$((PROFILE_DEPTH+1))
-  [[ $PROFILE_DEPTH -gt 4 ]] && die "profile recursion too deep ($q)"
-  PROFILE_TOKENS=(); local line
+  [[ $depth -gt 4 ]] && die "profile recursion too deep ($q)"
+  local line tok i prev=0
+  local -a toks=()
+  # flags that legitimately take a following value token on the same line
+  local VALFLAGS="--bind --ro-bind --dev-bind --hide --deny --tmpfs --rootfs
+                  -w --workdir --home --jail --label --script --setenv
+                  --unsetenv --timeout --max-procs --max-files --max-fsize
+                  --max-mem --nice --audit"
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%%#*}"                      # strip comments
     [[ -z "${line//[[:space:]]/}" ]] && continue
     # shellcheck disable=SC2206
-    PROFILE_TOKENS+=($line)                  # intentional word-split
+    toks=($line)                             # intentional word-split (one flag per line)
+    for tok in "${toks[@]}"; do
+      if [[ $prev == 1 ]]; then prev=0       # this token is a flag's value
+      elif [[ "$tok" == --profile ]]; then
+        :                                    # handled below via index walk
+      elif [[ "$tok" != -* ]]; then
+        die "profile '$q': stray token '$tok' — profiles accept flags only (values inline, e.g. --setenv K=V)"
+      fi
+      [[ " $VALFLAGS " == *" $tok "* ]] && prev=1
+    done
+    # walk tokens so nested --profile includes expand recursively
+    i=0
+    while [[ $i -lt ${#toks[@]} ]]; do
+      tok="${toks[$i]}"
+      if [[ "$tok" == --profile ]]; then
+        i=$((i+1))
+        [[ $i -lt ${#toks[@]} ]] || die "profile '$q': --profile needs a name"
+        collect_profile "${toks[$i]}" "$((depth+1))"
+      else
+        PROFILE_TOKENS+=("$tok")
+      fi
+      i=$((i+1))
+    done
   done < "$f"
-  [[ $QUIET == 0 ]] && say "profile ${C_GRN}${q}${C_RST} ← ${C_DIM}$f${C_RST} (${#PROFILE_TOKENS[@]} flags)"
+  [[ $QUIET == 0 && $depth == 0 ]] && say "profile ${C_GRN}${q}${C_RST} ← ${C_DIM}$f${C_RST} (${#PROFILE_TOKENS[@]} flags)"
   dbg "profile tokens: ${PROFILE_TOKENS[*]:-none}"
 }
 
@@ -224,17 +276,17 @@ parse_args() {
       --profile)     need_arg "$@"; collect_profile "$2"; shift 2; set -- "${PROFILE_TOKENS[@]}" "$@" ;;
 
       # --- filesystem view ---------------------------------------------
-      --bind)        need_arg "$@"; USER_BINDS+=("$(expand_path "$2")"); shift 2 ;;
-      --ro-bind)     need_arg "$@"; USER_RBINDS+=("$(expand_path "$2")"); shift 2 ;;
-      --dev-bind)    need_arg "$@"; USER_DEVB+=("$(expand_path "$2")"); shift 2 ;;
+      --bind)        need_arg "$@"; bind_arity_warn "$1" "$2" "${3:-}"; USER_BINDS+=("$(expand_path "$2")"); shift 2 ;;
+      --ro-bind)     need_arg "$@"; bind_arity_warn "$1" "$2" "${3:-}"; USER_RBINDS+=("$(expand_path "$2")"); shift 2 ;;
+      --dev-bind)    need_arg "$@"; bind_arity_warn "$1" "$2" "${3:-}"; USER_DEVB+=("$(expand_path "$2")"); shift 2 ;;
       --hide|--deny) need_arg "$@"; HIDES+=("$(expand_path "$2")"); shift 2 ;;
       --tmpfs)       need_arg "$@"; TMPFS_PATHS+=("$(expand_path "$2")"); shift 2 ;;
       --rootfs)      need_arg "$@"; ROOTFS="$(expand_path "$2")"; [[ -d $ROOTFS ]] || die "rootfs not found: $ROOTFS"; shift 2 ;;
       --workdir|-w)  need_arg "$@"; GCWD="$2"; shift 2 ;;
 
-      # --- sandbox identity / lifecycle --------------------------------
+      # --- identity / lifecycle --------------------------------
       --home)        need_arg "$@"; valid_name "$2"; BOX_NAME="$2"; shift 2 ;;
-      --ephemeral)   EPHEMERAL=1; shift ;;
+      --ephemeral)   EPHEMERAL=1; EPHEMERAL_EXPLICIT=1; shift ;;
       --jail)        need_arg "$@"; valid_name "$2"; JAIL="$2"; shift 2 ;;
       --ephemeral-jail) EPHEMERAL_JAIL=1; shift ;;
       --label)       need_arg "$@"; SANDBOX_LABEL="$2"; shift 2 ;;
@@ -248,12 +300,12 @@ parse_args() {
 
       # --- transport / resources -----------------------------------------
       --unshare-net|--no-net) NETBLOCK=1; shift ;;
-      --timeout)     need_arg "$@"; [[ "$2" =~ ^[0-9]+$ ]] || die "--timeout expects seconds"; TIMEOUT="$2"; shift 2 ;;
-      --max-procs)   need_arg "$@"; LIM_PROCS="$2"; shift 2 ;;
-      --max-files)   need_arg "$@"; LIM_FILES="$2"; shift 2 ;;
-      --max-fsize)   need_arg "$@"; LIM_FSIZE="$2"; shift 2 ;;   # MB
-      --max-mem)     need_arg "$@"; LIM_MEM="$2"; shift 2 ;;     # MB (addr space)
-      --nice)        need_arg "$@"; NICE_L="$2"; shift 2 ;;
+      --timeout)     need_arg "$@"; num_arg "$1" "$2"; TIMEOUT="$2"; shift 2 ;;
+      --max-procs)   need_arg "$@"; num_arg "$1" "$2"; LIM_PROCS="$2"; shift 2 ;;
+      --max-files)   need_arg "$@"; num_arg "$1" "$2"; LIM_FILES="$2"; shift 2 ;;
+      --max-fsize)   need_arg "$@"; num_arg "$1" "$2"; LIM_FSIZE="$2"; shift 2 ;;   # MB
+      --max-mem)     need_arg "$@"; num_arg "$1" "$2"; LIM_MEM="$2"; shift 2 ;;     # MB (addr space)
+      --nice)        need_arg "$@"; num_arg "$1" "$2"; [[ $2 -le 19 ]] || die "--nice range is 0..19"; NICE_L="$2"; shift 2 ;;
 
       # --- observability ---------------------------------------------------
       --audit)       need_arg "$@"; AUDIT="$2"; shift 2 ;;
@@ -319,7 +371,7 @@ tw_jail() {
 # --------------------------------------------------------------------------
 usage() {
 cat <<'EOF'
-  termwrap (tw) — ptrace sandbox for unrooted Termux · v0.1.0
+  termwrap (tw) — ptrace sandbox for unrooted Termux · v0.2.0
 
   USAGE
     tw [FLAGS] [--] CMD [ARGS...]        run CMD inside the sandbox
@@ -329,9 +381,12 @@ cat <<'EOF'
 
   FILESYSTEM VIEW
     --bind SRC[:DST]      bind SRC rw into the guest        (bwrap: --bind)
-    --ro-bind SRC[:DST]   bind read-only  (chmod snapshot; best-effort)
+    --ro-bind SRC[:DST]   bind read-only. Enforced ONLY with --no-fakeroot;
+                          refused under the default -0 (proot fake_id0 lifts
+                          file modes for the guest — TW_ALLOW_ROBIND_FAKE=1
+                          overrides the refusal). Modes restored exactly.
     --dev-bind SRC[:DST]  bind device nodes                 (bwrap: --dev-bind)
-    --hide PATH           PATH does not exist for the guest (empty overlay)
+    --hide PATH           shadow PATH: dirs appear empty, files read as /dev/null
     --tmpfs PATH          empty writable overlay at PATH
     --rootfs DIR          use DIR as / (advanced proot -r)
     -w, --workdir DIR     start in DIR (default: sandbox $HOME)
@@ -356,8 +411,9 @@ cat <<'EOF'
     --nice N              scheduling niceness 0..19
 
   OBSERVABILITY
-    --audit FILE          proot -v9 systrace → FILE (non-absolute → TW logs dir)
-    --dry-run             print the exact proot command, change nothing
+    --audit FILE          proot -v9 systrace → FILE (non-absolute → TW logs dir).
+                          NOTE: while auditing, guest stderr goes into FILE too.
+    --dry-run             print the exact proot command; no persistent changes
     -q, --quiet           suppress termwrap banners
 
   TMP POLICY / ROOT FAKING
@@ -366,8 +422,14 @@ cat <<'EOF'
     -0, --fakeroot        fake uid 0 (default)    --no-fakeroot   real uid
 
   STATE         $TW_HOME   (homes, jails, logs, tmp, profiles.d)
-  PROFILES      flag-files, one flag per line, '#'-comments,
-                searched in  $TW_HOME/profiles.d  then  $PREFIX/share/termwrap/profiles
+  PROFILES      flag-files, one flag per line, '#'-comments, values inline
+                (e.g. --setenv K=V), searched in  $TW_HOME/profiles.d  then
+                $PREFIX/share/termwrap/profiles; --profile includes allowed
+  SAFETY ENVS   TW_ALLOW_NESTED · TW_ALLOW_ROBIND_FAKE · TW_NETBLOCK_SO
+                TW_DEBUG · NO_COLOR
+  TEARDOWN      the sandbox runs in its own process group (setsid); on
+                timeout/exit/signal tw TERMs then KILLs the whole tree and
+                verifies it is gone before reporting success
 EOF
 }
 
@@ -381,18 +443,33 @@ cat <<'EOF'
      Profiles (Shelter/Insular) for a real uid split around whole sessions.
   2. NETBLOCK SCOPE     --unshare-net is an LD_PRELOAD shim over libc
      socket(): fail-closed for Termux packages (python, node, curl, wget).
-     Static binaries and Go's raw-syscall dial path BYPASS it. Treat as an
-     agent-safety rail, not a netns.
-  3. RO-BIND            enforced by chmod a-w snapshot + restore on exit.
-     Best-effort: crash windows and already-open fds are not covered.
+     Static binaries and Go's raw-syscall dial path BYPASS it — and so can
+     the guest itself with one builtin: `unset LD_PRELOAD` or
+     `env -u LD_PRELOAD`. It stops network ACCIDENTS (hallucinated curl,
+     injected fetches by naive code), not a process that knows it is boxed.
+     tw refuses user --setenv/--unsetenv of LD_PRELOAD/TW_NETBLOCK, but the
+     guest can still edit its own env at runtime. Real egress control for
+     sandbox-aware agents = keep the network on the HOST side of the loop.
+  3. RO-BIND            Enforced by chmod a-w snapshot + exact mode restore.
+     Refused under the default -0 fakeroot: proot's fake_id0 extension
+     really chmods host files writable for a fake-root guest, silently
+     defeating chmod-based protection (use --no-fakeroot, or --hide —
+     absence beats permissions). Even with --no-fakeroot, crash windows
+     and already-open fds are not covered.
   4. PTRACE OVERHEAD    fork/exec-heavy workloads pay 1.5–3×.
      For compute jobs without side-effects, run them unsandboxed.
   5. NO PID/NS ISOLATION the guest sees your process table and can signal
      within uid. No true unshare. It's a cage of view, not of privilege.
-  6. THE POINT          for AI agents the winning combo is:
+  6. TEARDOWN EDGES     since 0.2.0 the sandbox tree runs in its own process
+     group and tw TERMs→KILLs it on timeout/exit/signal, verifying death.
+     Residual risk: a tracer killed before cleanup (OOM, adb kill) cannot
+     restore ro-bind modes; always prefer --hide for precious paths.
+  7. THE POINT          for AI agents the winning combo is:
         tw --profile ai-agent --jail stock --timeout 900 -- <agent>
      jail = destructive ops hit a tar snapshot, never your real $PREFIX;
-     netblock = no exfiltration through libc sockets; audit = every exec.
+     netblock = no accidental exfiltration through libc sockets; audit =
+     every exec. Pair with the agent-guard two-phase loop: model proposes
+     on the HOST (network side), sandbox disposes on the action side.
   Android 12+ tip: kill the phantom-process monitor or proots get culled:
         adb shell settings put global settings_enable_monitor_phantom_procs false
 EOF
@@ -427,16 +504,43 @@ selftest() {
 # --------------------------------------------------------------------------
 cleanup() {
   local rc=$?
-  [[ -n "${CHILD_PID:-}" ]] && kill -0 "$CHILD_PID" 2>/dev/null && kill "$CHILD_PID" 2>/dev/null
-  local p
-  for p in "${CLEAN_RO[@]:-}";     do [[ -n $p && -e $p ]] && chmod -R u+w -- "$p" 2>/dev/null; done
-  for p in "${CLEAN_TMPDIRS[@]:-}";do [[ -n $p && -d $p ]] && rm -rf -- "$p" 2>/dev/null; done
+  # 1. guarantee the sandbox PROCESS GROUP is dead (tracer + every tracee)
+  if [[ -n "${CHILD_PID:-}" ]]; then
+    kill -KILL -- "-$CHILD_PID" 2>/dev/null
+    sleep 0.1
+    kill -0 -- "-$CHILD_PID" 2>/dev/null \
+      && err "sandbox tree survived SIGKILL (pgid $CHILD_PID) — inspect manually"
+    CHILD_PID=""
+  fi
+  [[ -n "${FUSE_PID:-}" ]] && kill "$FUSE_PID" 2>/dev/null
+  # 2. ro-bind: make traversable again, then restore EXACT original modes
+  local p mf mode path
+  for p in "${CLEAN_RO[@]:-}"; do [[ -n $p && -e $p ]] && chmod -R u+w -- "$p" 2>/dev/null; done
+  for mf in "${RO_MODES[@]:-}"; do
+    [[ -n $mf && -f $mf ]] || continue
+    while IFS='|' read -r mode path; do
+      [[ -n "$mode" && -e "$path" ]] && chmod "$mode" -- "$path" 2>/dev/null
+    done < "$mf"
+    rm -f -- "$mf"
+  done
+  # 3. temp dirs / ephemeral homes
+  for p in "${CLEAN_TMPDIRS[@]:-}"; do [[ -n $p && -d $p ]] && rm -rf -- "$p" 2>/dev/null; done
   [[ -n "$CLEAN_EPH_HOME" && -d "$CLEAN_EPH_HOME" ]] && rm -rf -- "$CLEAN_EPH_HOME" 2>/dev/null
   return $rc
 }
-on_sig() { say "signal caught — killing sandbox tree"; [[ -n ${CHILD_PID:-} ]] && kill -- "$CHILD_PID" 2>/dev/null; }
+on_sig() {
+  local sig="$1"
+  say "signal caught — killing sandbox tree (process group)"
+  if [[ -n "${CHILD_PID:-}" ]]; then
+    kill -TERM -- "-$CHILD_PID" 2>/dev/null
+    sleep 0.5
+    kill -KILL -- "-$CHILD_PID" 2>/dev/null
+  fi
+  exit $(( 128 + sig ))
+}
 trap cleanup EXIT
-trap on_sig INT TERM
+trap 'on_sig 2' INT
+trap 'on_sig 15' TERM
 
 # ==========================================================================
 # MAIN
@@ -454,6 +558,41 @@ unset _a
 
 parse_args "$@"
 
+# --- precedence honesty (flag interactions that silently surprise) ----------
+if [[ $EPHEMERAL_EXPLICIT == 1 && "$BOX_NAME" != default ]]; then
+  warn "--ephemeral wins: '--home $BOX_NAME' is ignored for this run"
+fi
+[[ -n "$SANDBOX_LABEL" && "$BOX_NAME" != default && $EPHEMERAL == 0 ]] \
+  && warn "--label ignored with a persistent --home (sandbox id = home name)"
+[[ $EPHEMERAL_JAIL == 1 && -z "$JAIL" ]] \
+  && warn "--ephemeral-jail without --jail: nothing to clone"
+[[ -n "$SCRIPT_FILE" && ${#CMD[@]} -gt 0 ]] \
+  && warn "--script ignored: an explicit command was given"
+
+# --- netblock env tamper guard ----------------------------------------------
+# the netblock is an env-based shim; a naive or hostile env must not disarm it
+if [[ $NETBLOCK == 1 ]]; then
+  for kv in "${ENVS[@]:-}"; do
+    case "$kv" in LD_PRELOAD=*|TW_NETBLOCK=*|TW_NETBLOCK_LOG=*)
+      die "refusing --setenv $kv: it would bypass --unshare-net" ;; esac
+  done
+  for k in "${UNSETS[@]:-}"; do
+    case "$k" in LD_PRELOAD|TW_NETBLOCK|TW_NETBLOCK_LOG)
+      die "refusing --unsetenv $k: it would bypass --unshare-net" ;; esac
+  done
+fi
+
+# --- ro-bind × fakeroot guard -------------------------------------------------
+# proot's fake_id0 (-0) extension really chmods host files writable whenever
+# the fake-root guest writes them — silently defeating chmod-based ro-bind.
+if [[ ${#USER_RBINDS[@]} -gt 0 && $FAKE_ROOT == 1 && "${TW_ALLOW_ROBIND_FAKE:-0}" != 1 ]]; then
+  err "--ro-bind under fakeroot (-0, the default) is NOT write-protected:"
+  err "  proot's fake_id0 lifts host file modes so the fake-root guest can write."
+  die "fix: add --no-fakeroot for enforced read-only binds, or set TW_ALLOW_ROBIND_FAKE=1 to accept the risk"
+fi
+[[ ${#USER_RBINDS[@]} -gt 0 && $FAKE_ROOT == 1 ]] \
+  && warn "TW_ALLOW_ROBIND_FAKE=1: --ro-bind paths are NOT write-protected under fakeroot"
+
 # nested-run guard: agents love to re-sandbox; refuse by default
 if [[ -n "${TW_SANDBOX_ID:-}" && $ALLOW_NESTED != 1 && "${TW_ALLOW_NESTED:-0}" != 1 ]]; then
   die "already inside sandbox ${TW_SANDBOX_ID} (use --allow-nested, or TW_ALLOW_NESTED=1)"
@@ -466,13 +605,18 @@ local_id="$(rand_id)"
 
 # --- sandbox home -------------------------------------------------------------
 if [[ "$EPHEMERAL" == 1 ]]; then
-  BOX_HOME="$(mktemp -d "$TW_HOME/tmp/home-$SID.XXXXXX")" || die "cannot create ephemeral home"
-  CLEAN_EPH_HOME="$BOX_HOME"
+  if [[ $DRY_RUN == 1 ]]; then
+    BOX_HOME="$TW_HOME/tmp/home-$SID.dryrun"   # printed, never created
+  else
+    BOX_HOME="$(mktemp -d "$TW_HOME/tmp/home-$SID.XXXXXX")" || die "cannot create ephemeral home"
+    CLEAN_EPH_HOME="$BOX_HOME"
+  fi
 else
-  BOX_HOME="$TW_HOME/home/$BOX_NAME"; mkdir -p "$BOX_HOME"
+  BOX_HOME="$TW_HOME/home/$BOX_NAME"; [[ $DRY_RUN == 1 ]] || mkdir -p "$BOX_HOME"
 fi
 
 # provision rc + notice (idempotent: don't clobber user edits)
+if [[ $DRY_RUN == 0 ]]; then
 [[ -f "$BOX_HOME/.bashrc" ]] || cat > "$BOX_HOME/.bashrc" <<'EOF'
 # termwrap sandbox rc
 PS1='[tw:${TW_SANDBOX_ID:0:6}] \w \$ '
@@ -487,6 +631,7 @@ this is a termwrap sandbox.
   mounted   $(date -Is)
 your real \$HOME is shadowed; what you see as ~ lives at $BOX_HOME
 EOF
+fi
 
 # --- jail binding ---------------------------------------------------------------
 JAIL_BIND_SRC=""
@@ -494,23 +639,35 @@ if [[ -n "$JAIL" ]]; then
   local_j="$(jail_dir "$JAIL")"
   [[ -d "$local_j" && -f "$local_j/.tw-jail" ]] || die "jail '$JAIL' missing — build it: tw jail build $JAIL"
   if [[ "$EPHEMERAL_JAIL" == 1 ]]; then
-    say "cloning jail '$JAIL' for single run (cp -a)…"
-    run_j="$(mktemp -d "$TW_HOME/tmp/jail-$SID.XXXXXX")"
-    cp -a "$local_j/." "$run_j/" || die "jail clone failed"
-    CLEAN_TMPDIRS+=("$run_j")       # wipe the sacrificial copy at exit
-    local_j="$run_j"
+    if [[ $DRY_RUN == 1 ]]; then
+      say "dry-run: jail '$JAIL' would be cloned per-run; using base path in the preview"
+    else
+      say "cloning jail '$JAIL' for single run (cp -a)…"
+      run_j="$(mktemp -d "$TW_HOME/tmp/jail-$SID.XXXXXX")"
+      cp -a "$local_j/." "$run_j/" || die "jail clone failed"
+      CLEAN_TMPDIRS+=("$run_j")       # wipe the sacrificial copy at exit
+      local_j="$run_j"
+    fi
   fi
   JAIL_BIND_SRC="$local_j"
 fi
 
-# --- read-only snapshot: chmod a-w, restore in cleanup -------------------------
+# --- read-only snapshot: chmod a-w, EXACT mode restore in cleanup -------------
 for spec in "${USER_RBINDS[@]:-}"; do
   [[ -z "$spec" ]] && continue
   src="${spec%%:*}"
   [[ -e "$src" ]] || die "--ro-bind source missing: $src"
+  if [[ $DRY_RUN == 1 ]]; then
+    [[ $QUIET == 0 ]] && ok "ro-bind: ${C_DIM}$src${C_RST} (dry-run: perms untouched)"
+    continue
+  fi
+  mf="$TW_HOME/tmp/modes.$(rand_id).lst"
+  find "$src" -exec stat -c '%a|%n' {} + 2>/dev/null > "$mf" || true
   if chmod -R a-w -- "$src" 2>/dev/null; then
-    CLEAN_RO+=("$src"); [[ $QUIET == 0 ]] && ok "ro-bind: ${C_DIM}$src${C_RST} (a-w snapshot)"
+    CLEAN_RO+=("$src"); RO_MODES+=("$mf")
+    [[ $QUIET == 0 ]] && ok "ro-bind: ${C_DIM}$src${C_RST} (a-w snapshot, exact restore armed)"
   else
+    rm -f -- "$mf"
     warn "ro-bind: could not chmod $src — NOT write-protected"
   fi
 done
@@ -558,10 +715,12 @@ done
 # --- guest working dir -----------------------------------------------------------
 [[ -z "$GCWD" ]] && GCWD="$HOME"
 
-# --- command ---------------------------------------------------------------------
+# --- script staging ------------------------------------------------------------
 if [[ -n "$SCRIPT_FILE" && ${#CMD[@]} -eq 0 ]]; then
-  cp -f "$SCRIPT_FILE" "$BOX_HOME/.tw-entry" 2>/dev/null || die "cannot stage $SCRIPT_FILE"
-  chmod +x "$BOX_HOME/.tw-entry" 2>/dev/null
+  if [[ $DRY_RUN == 0 ]]; then
+    cp -f "$SCRIPT_FILE" "$BOX_HOME/.tw-entry" 2>/dev/null || die "cannot stage $SCRIPT_FILE"
+    chmod +x "$BOX_HOME/.tw-entry" 2>/dev/null
+  fi
   CMD=("bash" "-l" "$HOME/.tw-entry")
 fi
 [[ ${#CMD[@]} -eq 0 ]] && CMD=("bash" "-l")
@@ -577,36 +736,42 @@ else
   for k in "${UNSETS[@]:-}"; do [[ -n $k ]] && EOPTS+=(-u "$k"); done
 fi
 EOPTS+=("TW_SANDBOX_ID=$SID" "TW_HOME=$TW_HOME")
+# user env FIRST, netblock env LAST: env(1) lets later assignments win, so the
+# shim can never be shadowed by a user-supplied LD_PRELOAD / TW_NETBLOCK
+for kv in "${ENVS[@]:-}"; do [[ -n $kv ]] && EOPTS+=("$kv"); done
 [[ $NETBLOCK == 1 ]] && EOPTS+=("TW_NETBLOCK=1" "LD_PRELOAD=$NETBLOCK_SO")
 # log blocked socket attempts into the audit stream when auditing
 [[ $NETBLOCK == 1 && -n "$AUDIT" ]] && EOPTS+=("TW_NETBLOCK_LOG=1")
-for kv in "${ENVS[@]:-}"; do [[ -n $kv ]] && EOPTS+=("$kv"); done
 
 # --- resource cage (runs as a bash preamble inside proot) --------------------------
-PRE="ulimit -Sc 0 2>/dev/null; "
-[[ -n "$LIM_FILES" ]] && PRE+="ulimit -n $LIM_FILES 2>/dev/null; "
-[[ -n "$LIM_PROCS" ]] && PRE+="ulimit -u $LIM_PROCS 2>/dev/null; "
-[[ -n "$LIM_FSIZE" ]] && PRE+="ulimit -f $(( LIM_FSIZE * 1024 )) 2>/dev/null; "
-[[ -n "$LIM_MEM" ]]   && PRE+="ulimit -v $(( LIM_MEM * 1024 )) 2>/dev/null; "
+# NOTE: unsupported limits are REPORTED, not silently dropped
+PRE="ulimit -Sc 0 2>/dev/null || echo 'tw: ulimit -Sc 0 not applied' >&2; "
+[[ -n "$LIM_FILES" ]] && PRE+="ulimit -n $LIM_FILES 2>/dev/null || echo 'tw: ulimit -n $LIM_FILES not applied' >&2; "
+[[ -n "$LIM_PROCS" ]] && PRE+="ulimit -u $LIM_PROCS 2>/dev/null || echo 'tw: ulimit -u $LIM_PROCS not applied' >&2; "
+[[ -n "$LIM_FSIZE" ]] && PRE+="ulimit -f $(( LIM_FSIZE * 1024 )) 2>/dev/null || echo 'tw: ulimit -f not applied' >&2; "
+[[ -n "$LIM_MEM" ]]   && PRE+="ulimit -v $(( LIM_MEM * 1024 )) 2>/dev/null || echo 'tw: ulimit -v not applied' >&2; "
 
 INNER=( env "${EOPTS[@]}" bash -c "${PRE}exec \"\$@\"" "tw-sh" "${CMD[@]}" )
 
 FULL=( proot "${PARGS[@]}" -w "$GCWD" "${INNER[@]}" )
 [[ "$NICE_L" != 0 ]] && FULL=( nice -n "$NICE_L" "${FULL[@]}" )
-[[ "$TIMEOUT" != 0 ]] && FULL=( timeout -k 3 -s KILL "$TIMEOUT" "${FULL[@]}" )
-
-# --- dry run -----------------------------------------------------------------------
-if [[ $DRY_RUN == 1 ]]; then
-  say "dry-run — nothing executed"
-  printf '%s' "$C_DIM"
-  printf '  %q' "${FULL[@]}" | fold -s -w 100 | sed 's/^/  /'
-  printf '%s\n' "$C_RST"
-  exit 0
-fi
+# the --timeout fuse is enforced by tw itself (TERM→KILL on the sandbox
+# process group) — see the launch section. A coreutils `timeout -s KILL`
+# wrapper would SIGKILL proot and orphan every tracee.
 
 # --- netblock sanity ------------------------------------------------------------------
 if [[ $NETBLOCK == 1 && ! -f "$NETBLOCK_SO" ]]; then
   die "netblock shim missing — run the installer (builds $NETBLOCK_SO)"
+fi
+
+# --- dry run -----------------------------------------------------------------------
+if [[ $DRY_RUN == 1 ]]; then
+  say "dry-run — nothing executed, no persistent state changed"
+  [[ ${#RO_MODES[@]} -eq 0 ]] || say "        (ro-bind permissions left untouched in dry-run)"
+  printf '%s' "$C_DIM"
+  printf '  %q' "${FULL[@]}" | fold -s -w 100 | sed 's/^/  /'
+  printf '%s\n' "$C_RST"
+  exit 0
 fi
 
 # --- banner -----------------------------------------------------------------------------
@@ -628,13 +793,44 @@ if [[ -n "$AUDIT" ]]; then
 fi
 
 # --- launch -------------------------------------------------------------------------------
+# setsid: the whole sandbox tree (tracer + tracees) lands in its OWN process
+# group, so tw can TERM→KILL all of it. Without a dedicated group, killing the
+# group would kill tw itself — and killing just the tracer ORPHANS the tracees
+# (the v0.1.0 teardown bug: guests surviving fuse/signals).
+HAS_SETSID="$(command -v setsid || true)"
+[[ -z "$HAS_SETSID" && $QUIET == 0 ]] && warn "setsid not found — teardown is best-effort (pkg install util-linux)"
 T0=$(date +%s)
-if [[ -n "$AUDIT_FILE" ]]; then
-  "${FULL[@]}" 2> "$AUDIT_FILE" & CHILD_PID=$!
+if [[ -n "$HAS_SETSID" ]]; then
+  if [[ -n "$AUDIT_FILE" ]]; then setsid "${FULL[@]}" 2> "$AUDIT_FILE" & CHILD_PID=$!
+  else setsid "${FULL[@]}" & CHILD_PID=$!; fi
 else
-  "${FULL[@]}" & CHILD_PID=$!
+  # fallback: same process group as tw — only the tracer can be signalled
+  if [[ -n "$AUDIT_FILE" ]]; then "${FULL[@]}" 2> "$AUDIT_FILE" & CHILD_PID=$!
+  else "${FULL[@]}" & CHILD_PID=$!; fi
 fi
+
+# fuse: TERM the sandbox group first (proot unwinds, --kill-on-exit runs),
+# KILL after a 3s grace. The watcher exits early if the tree dies on its own.
+if [[ $TIMEOUT != 0 && -n "$CHILD_PID" ]]; then
+  (
+    for (( _i=0; _i<TIMEOUT; _i++ )); do
+      sleep 1; kill -0 -- "-$CHILD_PID" 2>/dev/null || exit 0
+    done
+    kill -TERM -- "-$CHILD_PID" 2>/dev/null
+    for (( _i=0; _i<3; _i++ )); do
+      sleep 1; kill -0 -- "-$CHILD_PID" 2>/dev/null || exit 0
+    done
+    kill -KILL -- "-$CHILD_PID" 2>/dev/null
+  ) & FUSE_PID=$!
+fi
+
 wait "$CHILD_PID"; RC=$?
+# never claim a clean teardown until the tree is verifiably gone
+if [[ -n "${CHILD_PID:-}" ]] && kill -0 -- "-$CHILD_PID" 2>/dev/null; then
+  kill -KILL -- "-$CHILD_PID" 2>/dev/null
+  sleep 0.2
+  kill -0 -- "-$CHILD_PID" 2>/dev/null && TREE_ALIVE=1 || TREE_ALIVE=0
+fi
 CHILD_PID=""
 T1=$(date +%s)
 
@@ -644,13 +840,17 @@ if [[ -n "$AUDIT_FILE" ]]; then
   nb=$(awk '/tw-net/{n++} END{print n+0}'  "$AUDIT_FILE" 2>/dev/null)
   [[ $QUIET == 0 ]] && say "audit → ${C_DIM}$AUDIT_FILE${C_RST}  (${nx:-0} execve · ${nb:-0} netblocks)"
 fi
-if [[ $TIMEOUT != 0 && $RC -ge 124 && $RC -le 137 ]]; then
-  warn "fuse blown: sandbox hard-killed after ${TIMEOUT}s"
+if [[ $TIMEOUT != 0 && ( ( $RC -ge 124 && $RC -le 137 ) || $((T1-T0)) -ge $TIMEOUT ) ]]; then
+  warn "fuse blown: sandbox tree TERMinated (+KILL grace) after ${TIMEOUT}s"
+fi
+if [[ $TREE_ALIVE == 1 ]]; then
+  err "WARNING: sandbox processes SURVIVED teardown — this run was NOT fully contained"
 fi
 if [[ $QUIET == 0 ]]; then
   emo="[ok]"; [[ $RC != 0 ]] && emo="[x]"
-  printf '%s%s%s sandbox %s torn down · %ss · exit %d · host untouched\n' \
-    "${C_DIM}" "$emo" "${C_RST}" "$SID" "$((T1-T0))" "$RC" >&2
+  fate="tree reaped"; [[ $TREE_ALIVE == 1 ]] && fate="TREE NOT REAPED"
+  printf '%s%s%s sandbox %s torn down · %ss · exit %d · %s\n' \
+    "${C_DIM}" "$emo" "${C_RST}" "$SID" "$((T1-T0))" "$RC" "$fate" >&2
 fi
 exit "$RC"
 __TW_PAYLOAD_SCRIPT__
@@ -676,6 +876,8 @@ else
 //
 //  Scope note: raw-syscall binaries (static, most Go) bypass LD_PRELOAD —
 //  this is a safety rail for AI agents, not a kernel netns. See tw --caveats.
+//
+//  COPYRIGHT OPENTODO© — released under the MIT license.
 // ============================================================================
 #define _GNU_SOURCE
 #include <errno.h>
@@ -811,4 +1013,4 @@ printf '%s│%s tw --caveats         honest threat model\n' "$D" "$Z"
 printf '%s│%s tw jail build stock  rm-proof prefix jail\n' "$D" "$Z"
 printf '%s│%s tw --profile ai-agent -- <cmd>   run an agent\n' "$D" "$Z"
 printf '%s└─────────────────────────────────────────%s\n' "$D" "$Z"
-ok "termwrap v0.1.0 ready — trust nothing, run anything."
+ok "termwrap v0.2.0 ready — trust nothing, run anything."

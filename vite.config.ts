@@ -66,6 +66,9 @@ export default defineConfig({
   server: {
     host: true,
     allowedHosts: true,
+    watch: {
+      ignored: ["**/.lab/**", "**/dist/**", "**/node_modules/**"],
+    },
   },
   preview: {
     host: true,
