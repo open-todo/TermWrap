@@ -359,7 +359,7 @@ proot-distro puts you inside a foreign distro. termwrap sandboxes your *existing
 
 ## Repository layout
 
-The **app** and the **website** are fully isolated from each other:
+The **app** :
 
 ```
 TermWrap/
@@ -370,23 +370,7 @@ TermWrap/
 │   ├── ai-agent.conf           default policy profile for AI agents
 │   └── agent-guard.sh          model-proposes / sandbox-disposes loop
 │
-├── index.html              ← the website (landing page)
-├── src/                        React + Tailwind source (hero, docs, FAQ, source browser…)
-├── public/                     website-only static assets (favicon)
-├── vite.config.ts              mounts app/ at /files/** (dev) and dist/files/ (build)
-├── package.json / tsconfig.json
-└── README.md                   ← you are here
-```
 
-The website never owns app code: `app/` is the single source of truth, and a tiny Vite plugin (`termwrapAppFiles` in `vite.config.ts`) *serves* it at `/files/*` so links like [`/files/install.sh`](http://localhost:5173/files/install.sh) and the site's source browser keep working — in dev (`vite dev`) and in production builds (`vite build` copies `app/` → `dist/files/`).
-
-## Developing the website
-
-```bash
-npm install
-npm run dev        # landing page at http://localhost:5173, app files at /files/*
-npm run build      # single-file site in dist/ + dist/files/ (the app, copied in)
-npm run preview    # serve the production build
 ```
 
 To release the app itself, ship `app/` as-is — it has no build step. The installer even prefers sibling files (`./termwrap.sh`, `./tw-netblock.c`, …) next to itself, so a plain directory download works offline.
@@ -397,7 +381,7 @@ MIT — see [LICENSE](LICENSE). © OPENTODO.
 
 ## Changelog
 
-**0.2.0 — hardening release** (driven by the [full test campaign](TEST-REPORT.md)):
+**0.2.0 — hardening release** :
 - sandbox tree runs in its own process group (`setsid`); `--timeout`/signals now TERM→KILL the whole tree and tw *verifies* death before reporting `tree reaped` — no more orphaned guests after a blown fuse (was: tracees survived the KILL fuse and SIGTERM)
 - `--ro-bind` refused under default fakeroot (proot `fake_id0` defeats chmod-based protection); enforced with `--no-fakeroot`; exact mode restore (was: lossy 666→644)
 - netblock env applied after user env; user `--setenv/--unsetenv` of `LD_PRELOAD`/`TW_NETBLOCK` refused — the shim can no longer be env-disarmed
